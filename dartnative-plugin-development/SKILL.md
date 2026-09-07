@@ -1,6 +1,6 @@
 ---
 name: dartnative-plugin-development
-description: Build custom native platform plugins and host native OS views in DartNative using NativeElement, UIKitReconciler, FlexProps, ViewProps, and PluginMutation. Use when writing plugins, hosting native UI views, sending mutations over FFI, or setting up native view layout properties.
+description: Build custom native platform plugins and host native OS views in DartNative using NativeElement, ViewType, UIKitReconciler, FlexProps, ViewProps, and PluginMutation. Use when writing plugins, hosting native UI views, sending FFI mutations, or setting up native view layout properties.
 ---
 
 # DartNative Plugin Development Guide
@@ -12,17 +12,18 @@ DartNative plugins allow hosting native OS views (such as platform-native video 
 Plugin implementations should import `package:dartnative/plugin.dart` (which exports reconciler elements, mutations, and flags) alongside `package:dartnative/dartnative.dart`:
 
 ```dart
+import 'dart:typed_data';
 import 'package:dartnative/dartnative.dart';
 import 'package:dartnative/plugin.dart';
 ```
 
 ## Creating a Native Hosted View Plugin
 
-To host a native OS view, extend `NativeElement` and declare its platform `ViewType` key and layout properties (`ViewProps` / `FlexProps`).
+To host a native OS view, extend `NativeElement`, claim an integer `viewType` from its string key via `ViewType.claim(key)`, override `buildProps()`, and dispatch `PluginMutation` payloads using `emitMutation()`.
 
 ```dart
-// 1. Declare ViewType key matching platform registration
-const String kNativeMapViewType = 'com.example.native_map_view';
+// 1. Claim unique integer viewType from string key
+final int kNativeMapViewType = ViewType.claim('com.example.native_map_view');
 
 class NativeMapView extends Widget {
   final String apiKey;
@@ -45,36 +46,39 @@ class NativeMapElement extends NativeElement {
   NativeMapView get widget => super.widget as NativeMapView;
 
   @override
-  String get viewType => kNativeMapViewType;
+  int get viewType => kNativeMapViewType;
 
   @override
-  ViewProps createProps() {
-    return ViewProps(
-      flexProps: FlexProps(
-        flexGrow: 1.0,
-      ),
+  ViewProps buildProps() {
+    return const ViewProps(
+      clipsToBounds: true,
+      userInteractionEnabled: true,
     );
   }
 
   @override
-  void mount(Element? parent, Object? newSlot) {
-    super.mount(parent, newSlot);
-    // Send initial configuration to native view
+  void mount(Element? parent, UIKitReconciler rec) {
+    super.mount(parent, rec);
     _configureNativeMap();
   }
 
   @override
-  void update(NativeMapView newWidget) {
+  void update(Widget newWidget) {
     super.update(newWidget);
     _configureNativeMap();
   }
 
   void _configureNativeMap() {
-    // Send mutation over native FFI channel
-    sendPluginMutation(PluginMutation(
-      viewId: viewId,
-      action: 'setApiKey',
-      payload: {'apiKey': widget.apiKey, 'traffic': widget.showTraffic},
+    if (viewId == null) return;
+
+    // Encodes payload into Uint8List bytes for high-speed FFI dispatch
+    final Uint8List payloadBytes = Uint8List.fromList(widget.apiKey.codeUnits);
+
+    // Send PluginMutation via Element.emitMutation()
+    emitMutation(PluginMutation(
+      viewId!,
+      1, // eventTag identifier
+      payloadBytes,
     ));
   }
 }
@@ -82,10 +86,11 @@ class NativeMapElement extends NativeElement {
 
 ## Plugin Architecture & Reconciler Surface
 
-- **`NativeElement`**: The element node connecting DartNative's element tree to a platform view instance (`ViewId`).
+- **`NativeElement`**: The element node connecting DartNative's element tree to a platform view instance (`viewId`).
+- **`ViewType.claim(key)`**: Maps string platform view identifiers to framework integer claim IDs.
 - **`UIKitReconciler` / `DartNativeReconciler`**: Reconciles layout changes and sends view mutations to the underlying native engine via high-speed direct FFI calls.
 - **`FlexProps` / `ViewProps`**: Instructs the native FlexLayout / Auto Layout engine on sizing, flex grow/shrink, margins, and alignment (`SetAlignSelf`, `SetFlexAspectRatio`, `SetFlexPositionType`, `SetFlexPositionInsets`).
-- **`PluginMutation` / `ViewMutation`**: Imperative mutation signals dispatched from Dart to update platform view parameters without tearing down or re-creating the native view.
+- **`PluginMutation`**: Low-level binary mutation signal containing `(viewId, eventTag, Uint8List data)` dispatched to update platform view parameters without tearing down the native view.
 
 ## Debugging Plugin Diagnostics
 
@@ -108,6 +113,7 @@ void main() {
 
 ## Gotchas for Plugin Creators
 
+- **ViewType Types:** `NativeElement.viewType` returns an `int` (not a `String`). Use `ViewType.claim('my.plugin.view')` to map string view keys to integer claim IDs.
+- **`buildProps` Override:** Override `buildProps()` (not `createProps()`) on `NativeElement` subclasses.
 - **Direct Imports:** Plugins MUST import `package:dartnative/plugin.dart` instead of deep internal `src/reconciler/` paths.
-- **View Lifecycle:** Native view instances are assigned a unique `ViewId` upon mounting. Clean up FFI resources or native listeners in element unmount/dispose overrides.
 - **Zero Lock Injection:** Do not import `package:flutter` in plugin packages; sitting directly on `dart:ui`/FFI keeps consumer project lock files free of Flutter SDK lock dependencies.
